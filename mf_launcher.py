@@ -20,6 +20,7 @@ GAME = os.path.join(BASE, "game")
 CACHE = os.path.join(BASE, "cache")
 CFG_FILE = os.path.join(BASE, "launcher.json")
 STATE_FILE = os.path.join(BASE, "pack-state.json")
+PID_FILE = os.path.join(BASE, "game.pid")
 
 
 def load(path, default):
@@ -201,7 +202,43 @@ def launch(vid, acc, token, ram_gb):
     cmd = mll.command.get_minecraft_command(vid, GAME, opts)
     flags = 0x08000000 if os.name == "nt" else 0          # Windows: без чёрного окна консоли
     log = open(os.path.join(BASE, "last-launch.log"), "w", encoding="utf-8")
-    return subprocess.Popen(cmd, cwd=GAME, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+    # Linux/Wayland: игра без рамки окна (GNOME не рисует её Wayland-окнам GLFW) — запускаем через X11, как Prism
+    env = None
+    if os.name != "nt":
+        env = dict(os.environ)
+        if env.get("DISPLAY"): env.pop("WAYLAND_DISPLAY", None)
+        if getattr(sys, "frozen", False):              # PyInstaller подменяет LD_LIBRARY_PATH — игре нужен системный
+            orig = env.pop("LD_LIBRARY_PATH_ORIG", None)
+            if orig: env["LD_LIBRARY_PATH"] = orig
+            else: env.pop("LD_LIBRARY_PATH", None)
+    proc = subprocess.Popen(cmd, cwd=GAME, stdout=log, stderr=subprocess.STDOUT, creationflags=flags, env=env)
+    with open(PID_FILE, "w") as f: f.write(str(proc.pid))
+    return proc
+
+
+def game_pid():
+    """PID запущенной из лаунчера игры (и после перезапуска лаунчера) или None."""
+    try: pid = int(open(PID_FILE).read())
+    except (OSError, ValueError): return None
+    if os.name == "nt":
+        import ctypes                                    # ponytail: PID могут переиспользовать — редкость, проверка имени не нужна
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x00100000 | 0x1000, False, pid)   # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        if not h: return None
+        alive = k.WaitForSingleObject(h, 0) == 0x102        # WAIT_TIMEOUT = ещё работает
+        k.CloseHandle(h)
+        return pid if alive else None
+    try:
+        return pid if GAME.encode() in open(f"/proc/{pid}/cmdline", "rb").read() else None
+    except OSError:
+        return None
+
+
+def stop_game(pid):
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], creationflags=0x08000000)
+    else:
+        os.kill(pid, 15)                                 # SIGTERM: Minecraft закрывается штатно, мир сохраняет
 
 
 # ─── Окно ────────────────────────────────────────────────────────────────
@@ -248,6 +285,8 @@ class App:
         self.draw_account()
         self.run(self.load_versions)
         r.after(100, self.poll)
+        self.running = None
+        r.after(500, self.watch_game)
 
     # фоновые задачи: всё, что качает или ждёт, — не в потоке окна
     def run(self, fn, *a):
@@ -261,7 +300,20 @@ class App:
     def ui(self, fn): self.q.put(fn)
     def set_status(self, s): self.ui(lambda: self.status.config(text=s))
     def set_progress(self, v): self.ui(lambda: self.bar.config(value=v))
-    def done(self): self.busy = False; self.play.config(state="normal")
+    def done(self): self.busy = False; self.play.config(state="normal"); self.running = None
+
+    def watch_game(self):
+        """Раз в секунду: игра запущена — красная «ЗАКРЫТЬ», нет — зелёная «ИГРАТЬ»."""
+        run = game_pid() is not None
+        if not self.busy and run != self.running:
+            self.running = run
+            if run:
+                self.play.config(text="ЗАКРЫТЬ", bg="#c0392b", activebackground="#d64535")
+                self.status.config(text="Игра запущена")
+            else:
+                self.play.config(text="ИГРАТЬ", bg=ACCENT, activebackground="#4cbb5b")
+                if self.status.cget("text") == "Игра запущена": self.status.config(text="")
+        self.root.after(1000, self.watch_game)
 
     def poll(self):
         while not self.q.empty(): self.q.get()()
@@ -371,6 +423,11 @@ class App:
 
     # ─── играть ───
     def on_play(self):
+        pid = game_pid()
+        if pid:
+            if messagebox.askyesno("MF-Launcher", "Закрыть игру?" + ("\n\nВ одиночной игре несохранённое может потеряться — лучше выйти из мира в игре." if os.name == "nt" else "")):
+                stop_game(pid)
+            return
         acc = self.cfg.get("account")
         if not acc:
             return messagebox.showwarning("MF-Launcher", "Сначала войди: введи ник и нажми «Войти без лицензии»")
@@ -398,7 +455,7 @@ class App:
         self.cfg["account"] = acc; save(CFG_FILE, self.cfg)
         self.set_status("Запуск игры…"); self.set_progress(1.0)
         launch(vid, acc, token, self.cfg["ram"])
-        self.set_status("Игра запущена — лаунчер можно закрыть")
+        self.set_status("")
 
 
 if __name__ == "__main__":
