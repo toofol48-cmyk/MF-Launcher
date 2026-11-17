@@ -250,7 +250,7 @@ class App:
         self.cfg = load(CFG_FILE, {"ram": 4})
         self.versions, self.busy, self.q = [], False, queue.Queue()
         r = self.root = tk.Tk()
-        r.title("MF-Launcher"); r.configure(bg=BG); r.geometry("440x420"); r.resizable(False, False)
+        r.title("MF-Launcher"); r.configure(bg=BG); r.geometry("440x450"); r.resizable(False, False)
         from tkinter import font as tkfont
         fam = next((f for f in ("Segoe UI", "Noto Sans", "Cantarell", "DejaVu Sans") if f in tkfont.families()), "TkDefaultFont")
         self.F = lambda size=10, bold=False: (fam, size, "bold") if bold else (fam, size)
@@ -282,6 +282,9 @@ class App:
         self.play.pack(fill="x", padx=30, pady=(10, 6), ipady=6)
         self.bar = ttk.Progressbar(r, maximum=1.0); self.bar.pack(fill="x", padx=30)
         self.status = tk.Label(r, text="", bg=BG, fg=DIM, wraplength=380); self.status.pack(pady=4)
+        links = tk.Frame(r, bg=BG); links.pack()
+        for text, cmd in (("Логи", self.open_logs), ("Папка игры", lambda: open_folder(GAME))):
+            tk.Button(links, text=text, command=cmd, bg=BG, fg=DIM, activebackground=PANEL, relief="flat", bd=0, cursor="hand2").pack(side="left", padx=8)
 
         self.draw_account()
         self.run(self.load_versions)
@@ -390,6 +393,11 @@ class App:
         i = self.ver.current()
         self.notes.config(text=self.versions[i]["notes"][:200] if 0 <= i < len(self.versions) else "")
 
+    def open_logs(self):
+        if getattr(self, "logs", None) and self.logs.win.winfo_exists():
+            self.logs.win.lift(); return
+        self.logs = LogWindow(self)
+
     # ─── полная сборка ───
     def install(self, target, full):
         global PACK_KEY
@@ -456,6 +464,51 @@ class App:
         self.set_status("Запуск игры…"); self.set_progress(1.0)
         launch(vid, acc, token, self.cfg["ram"])
         self.set_status("")
+
+
+def open_folder(path):
+    os.makedirs(path, exist_ok=True)
+    if os.name == "nt": os.startfile(path)
+    else: subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class LogWindow:
+    """Лог игры как в Prism: обновляется на ходу, ошибки красным, предупреждения жёлтым."""
+    def __init__(self, app):
+        self.app, self.pos = app, 0
+        w = self.win = tk.Toplevel(app.root)
+        w.title("MF-Launcher — логи игры"); w.configure(bg=BG); w.geometry("900x520")
+        bar = tk.Frame(w, bg=BG); bar.pack(fill="x", padx=6, pady=4)
+        self.follow = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text="Прокручивать вниз", variable=self.follow, bg=BG, fg=FG, selectcolor=PANEL,
+                       activebackground=BG, activeforeground=FG).pack(side="left")
+        for text, cmd in (("Копировать всё", self.copy), ("Папка логов", lambda: open_folder(os.path.join(GAME, "logs")))):
+            tk.Button(bar, text=text, command=cmd, bg=PANEL, fg=FG, relief="flat").pack(side="right", padx=3)
+        mono = ("Consolas", 10) if os.name == "nt" else ("DejaVu Sans Mono", 9)
+        self.text = tk.Text(w, bg="#101214", fg=FG, insertbackground=FG, font=mono, wrap="none", relief="flat")
+        sb = tk.Scrollbar(w, command=self.text.yview); self.text.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self.text.pack(fill="both", expand=True)
+        self.text.tag_config("err", foreground="#ff6b6b"); self.text.tag_config("warn", foreground="#e5c07b")
+        self.tick()
+
+    def tick(self):
+        if not self.win.winfo_exists(): return
+        path = os.path.join(BASE, "last-launch.log")
+        try:
+            if os.path.getsize(path) < self.pos:          # новый запуск — лог начат заново
+                self.pos = 0; self.text.delete("1.0", "end")
+            with open(path, encoding="utf-8", errors="replace") as f:
+                f.seek(self.pos); chunk = f.read(); self.pos = f.tell()
+        except OSError:
+            chunk = ""
+        for line in chunk.splitlines(True):
+            tag = "err" if ("ERROR" in line or "Exception" in line or line.startswith("\tat ")) else "warn" if "WARN" in line else ""
+            self.text.insert("end", line, tag)
+        if chunk and self.follow.get(): self.text.see("end")
+        self.win.after(500, self.tick)
+
+    def copy(self):
+        self.win.clipboard_clear(); self.win.clipboard_append(self.text.get("1.0", "end"))
 
 
 if __name__ == "__main__":
