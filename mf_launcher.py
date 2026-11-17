@@ -2,9 +2,9 @@
 """MF-Launcher — простой лаунчер сборки «Не мой сервер».
 Версии сборки = релизы GitHub с тегом pack-* (файл .mrpack). Настройки игрока не трогаются:
 файл из сборки перезаписывается, только если игрок его не менял (сверка с тем, что ставили в прошлый раз)."""
-import hashlib, http.server, io, json, os, queue, shutil, subprocess, sys, threading, urllib.parse, urllib.request, uuid, webbrowser, zipfile
+import hashlib, http.server, io, json, os, queue, shutil, subprocess, sys, threading, urllib.error, urllib.parse, urllib.request, uuid, webbrowser, zipfile
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 import minecraft_launcher_lib as mll
 
 REPO = "toofol48-cmyk/MF-Launcher"          # где лежат релизы сборки
@@ -12,6 +12,8 @@ TITLE = "Не мой сервер"
 MS_CLIENT_ID = "b782a2f5-5fb7-4468-8ea3-5e9c57b76e03"   # Azure-приложение MF-Launcher (нужно одобрение Mojang)
 MS_REDIRECT = "http://localhost:43123/callback"
 UA = {"User-Agent": "MF-Launcher"}
+PRIVATE_HOST = "https://relay.toofol.com/files/"   # часть сборки — только по паролю сборки
+PACK_KEY = ""
 
 BASE = os.path.join(os.environ["APPDATA"], "MF-Launcher") if os.name == "nt" else os.path.expanduser("~/.local/share/MF-Launcher")
 GAME = os.path.join(BASE, "game")
@@ -61,8 +63,15 @@ def download(url, dest, sha1=None, progress=None):
             return cached
         dest = cached
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if url.startswith(PRIVATE_HOST):
+        url += "?k=" + urllib.parse.quote(PACK_KEY)
     h = hashlib.sha1()
-    with http_get(url, 120) as r, open(dest + ".part", "wb") as f:
+    try:
+        r = http_get(url, 120)
+    except urllib.error.HTTPError as e:
+        if e.code == 401: raise PermissionError("Неверный пароль сборки — спроси у MFoors")
+        raise
+    with r, open(dest + ".part", "wb") as f:
         total, done = int(r.headers.get("Content-Length") or 0), 0
         for b in iter(lambda: r.read(1 << 16), b""):
             f.write(b); h.update(b); done += len(b)
@@ -333,12 +342,22 @@ class App:
         self.cfg["ram"] = int(self.ram.get().split()[0]); save(CFG_FILE, self.cfg)
         i = self.ver.current()
         target = self.versions[i] if 0 <= i < len(self.versions) else None
+        if target and target["tag"] != load(STATE_FILE, {}).get("tag") and not self.cfg.get("pack_key"):
+            k = simpledialog.askstring("Пароль сборки", "Пароль сборки (спроси у MFoors):", parent=self.root)
+            if not k: return
+            self.cfg["pack_key"] = k.strip(); save(CFG_FILE, self.cfg)
+        global PACK_KEY
+        PACK_KEY = self.cfg.get("pack_key", "")
         self.run(self.play_worker, acc, target)
 
     def play_worker(self, acc, target):
         state = load(STATE_FILE, {})
         if target and target["tag"] != state.get("tag"):
-            vid, kept = install_pack(target, self.set_status, self.set_progress)
+            try:
+                vid, kept = install_pack(target, self.set_status, self.set_progress)
+            except PermissionError:
+                self.cfg.pop("pack_key", None); save(CFG_FILE, self.cfg)
+                raise
             self.ui(lambda: self.ver.config(values=[self.label(v) for v in self.versions]))
         elif state.get("version"):
             vid = state["version"]
