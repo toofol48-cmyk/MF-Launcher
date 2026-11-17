@@ -83,7 +83,8 @@ def download(url, dest, sha1=None, progress=None):
     return dest
 
 
-def install_pack(ver, status, progress):
+def install_pack(ver, status, progress, full=False):
+    """full=False — без файлов с посредника (Fresh, A&S); full=True — нужен пароль сборки (PACK_KEY)."""
     """Ставит версию сборки поверх папки игры. Возвращает id версии для запуска."""
     status(f"Загрузка сборки {ver['name']}…")
     mrpack = download(ver["url"], os.path.join(CACHE, "packs", ver["tag"] + ".mrpack"), progress=progress)
@@ -94,7 +95,7 @@ def install_pack(ver, status, progress):
     # что должно лежать в папке игры: путь -> (sha1, откуда взять)
     want = {}
     for f in index["files"]:
-        if f.get("env", {}).get("client") != "unsupported":
+        if f.get("env", {}).get("client") != "unsupported" and (full or not f["downloads"][0].startswith(PRIVATE_HOST)):
             want[f["path"]] = (f["hashes"]["sha1"], ("url", f["downloads"][0]))
     for n in z.namelist():
         if n.startswith(("overrides/", "client-overrides/")) and not n.endswith("/"):
@@ -138,7 +139,7 @@ def install_pack(ver, status, progress):
           "setMax": lambda m: cb.__setitem__("max", m)}
     mll.install.install_minecraft_version(vid, GAME, callback=cb)
 
-    save(STATE_FILE, {"tag": ver["tag"], "version": vid, "files": {r: s for r, (s, _) in want.items()}})
+    save(STATE_FILE, {"tag": ver["tag"], "version": vid, "full": full, "files": {r: s for r, (s, _) in want.items()}})
     return vid, kept
 
 
@@ -211,7 +212,7 @@ class App:
         self.cfg = load(CFG_FILE, {"ram": 4})
         self.versions, self.busy, self.q = [], False, queue.Queue()
         r = self.root = tk.Tk()
-        r.title("MF-Launcher"); r.configure(bg=BG); r.geometry("440x380"); r.resizable(False, False)
+        r.title("MF-Launcher"); r.configure(bg=BG); r.geometry("440x420"); r.resizable(False, False)
         from tkinter import font as tkfont
         fam = next((f for f in ("Segoe UI", "Noto Sans", "Cantarell", "DejaVu Sans") if f in tkfont.families()), "TkDefaultFont")
         self.F = lambda size=10, bold=False: (fam, size, "bold") if bold else (fam, size)
@@ -236,6 +237,8 @@ class App:
         self.notes = tk.Label(r, text="", bg=BG, fg=DIM, wraplength=380, justify="left", anchor="w", height=2)
         self.notes.pack(fill="x", padx=30)
 
+        self.full_btn = tk.Button(r, command=self.on_full, bg=PANEL, fg=FG, relief="flat", cursor="hand2")
+        self.full_btn.pack(fill="x", padx=30, pady=(6, 0)); self.draw_full()
         self.play = tk.Button(r, text="ИГРАТЬ", command=self.on_play, bg=ACCENT, fg="white", activebackground="#4cbb5b",
                               font=self.F(15, True), relief="flat", bd=0, cursor="hand2")
         self.play.pack(fill="x", padx=30, pady=(10, 6), ipady=6)
@@ -334,6 +337,38 @@ class App:
         i = self.ver.current()
         self.notes.config(text=self.versions[i]["notes"][:200] if 0 <= i < len(self.versions) else "")
 
+    # ─── полная сборка ───
+    def install(self, target, full):
+        global PACK_KEY
+        PACK_KEY = self.cfg.get("pack_key", "")
+        return install_pack(target, self.set_status, self.set_progress, full)
+
+    def forget_key(self):
+        self.cfg.pop("pack_key", None); save(CFG_FILE, self.cfg)
+        self.ui(self.draw_full)
+
+    def draw_full(self):
+        if self.cfg.get("pack_key"):
+            self.full_btn.config(text="Полная сборка ✓", state="disabled")
+        else:
+            self.full_btn.config(text="Полная сборка — по паролю", state="normal")
+
+    def on_full(self):
+        k = simpledialog.askstring("Полная сборка", "Пароль сборки (спроси у MFoors):", parent=self.root)
+        if not k: return
+        self.cfg["pack_key"] = k.strip(); save(CFG_FILE, self.cfg); self.draw_full()
+        i = self.ver.current()
+        target = self.versions[i] if 0 <= i < len(self.versions) else None
+        if not target: return
+        def go():
+            try:
+                self.install(target, True)
+            except PermissionError:
+                self.forget_key(); raise
+            self.ui(lambda: self.ver.config(values=[self.label(v) for v in self.versions]))
+            self.set_status("Полная сборка установлена")
+        self.run(go)
+
     # ─── играть ───
     def on_play(self):
         acc = self.cfg.get("account")
@@ -342,21 +377,16 @@ class App:
         self.cfg["ram"] = int(self.ram.get().split()[0]); save(CFG_FILE, self.cfg)
         i = self.ver.current()
         target = self.versions[i] if 0 <= i < len(self.versions) else None
-        if target and target["tag"] != load(STATE_FILE, {}).get("tag") and not self.cfg.get("pack_key"):
-            k = simpledialog.askstring("Пароль сборки", "Пароль сборки (спроси у MFoors):", parent=self.root)
-            if not k: return
-            self.cfg["pack_key"] = k.strip(); save(CFG_FILE, self.cfg)
-        global PACK_KEY
-        PACK_KEY = self.cfg.get("pack_key", "")
         self.run(self.play_worker, acc, target)
 
     def play_worker(self, acc, target):
         state = load(STATE_FILE, {})
-        if target and target["tag"] != state.get("tag"):
+        full = bool(self.cfg.get("pack_key"))
+        if target and (target["tag"] != state.get("tag") or full and not state.get("full")):
             try:
-                vid, kept = install_pack(target, self.set_status, self.set_progress)
+                vid, kept = self.install(target, full)
             except PermissionError:
-                self.cfg.pop("pack_key", None); save(CFG_FILE, self.cfg)
+                self.forget_key()
                 raise
             self.ui(lambda: self.ver.config(values=[self.label(v) for v in self.versions]))
         elif state.get("version"):
