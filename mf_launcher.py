@@ -202,11 +202,12 @@ def launch(vid, acc, token, ram_gb):
     cmd = mll.command.get_minecraft_command(vid, GAME, opts)
     flags = 0x08000000 if os.name == "nt" else 0          # Windows: без чёрного окна консоли
     log = open(os.path.join(BASE, "last-launch.log"), "w", encoding="utf-8")
-    # Linux/Wayland: игра без рамки окна (GNOME не рисует её Wayland-окнам GLFW) — запускаем через X11, как Prism
+    # Linux/Wayland: GNOME не рисует рамку Wayland-окнам игры (нет libdecor) — запускаем через X11 (XWayland)
     env = None
     if os.name != "nt":
         env = dict(os.environ)
-        if env.get("DISPLAY"): env.pop("WAYLAND_DISPLAY", None)
+        if env.get("DISPLAY"):                           # 26.x открывает окно через SDL3 — его тоже на X11
+            env.pop("WAYLAND_DISPLAY", None); env["SDL_VIDEO_DRIVER"] = "x11"
         if getattr(sys, "frozen", False):              # PyInstaller подменяет LD_LIBRARY_PATH — игре нужен системный
             orig = env.pop("LD_LIBRARY_PATH_ORIG", None)
             if orig: env["LD_LIBRARY_PATH"] = orig
