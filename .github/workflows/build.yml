@@ -1,0 +1,27 @@
+# Сборка лаунчера: тег launcher-v* -> релиз с MF-Launcher.exe (Windows) и MF-Launcher (Linux)
+name: build
+on:
+  push:
+    tags: ["launcher-v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with: { python-version: "3.12" }
+      # Linux: системный Python с Tk на Xft (гладкие шрифты); старый glibc — запустится на дистрибутивах посвежее
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk python3-pip
+      - run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -m pip install minecraft-launcher-lib pyinstaller
+      - run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -m PyInstaller --onefile --windowed --name MF-Launcher mf_launcher.py
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MF-Launcher*
+          name: "Лаунчер ${{ github.ref_name }}"
