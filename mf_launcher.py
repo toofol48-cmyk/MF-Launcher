@@ -9,7 +9,7 @@ import minecraft_launcher_lib as mll
 
 REPO = "toofol48-cmyk/MF-Launcher"          # где лежат релизы сборки
 TITLE = "Не мой сервер"
-MS_CLIENT_ID = ""                    # Azure-приложение, одобренное Mojang; пусто = вход по лицензии выключен
+MS_CLIENT_ID = "b782a2f5-5fb7-4468-8ea3-5e9c57b76e03"   # Azure-приложение MF-Launcher (нужно одобрение Mojang)
 MS_REDIRECT = "http://localhost:43123/callback"
 UA = {"User-Agent": "MF-Launcher"}
 
@@ -166,7 +166,12 @@ def microsoft_login():
         got.pop("url")
     srv.server_close()
     code = mll.microsoft_account.parse_auth_code_url(got.get("url", ""), state)
-    r = mll.microsoft_account.complete_login(MS_CLIENT_ID, None, MS_REDIRECT, code, verifier)
+    try:
+        r = mll.microsoft_account.complete_login(MS_CLIENT_ID, None, MS_REDIRECT, code, verifier)
+    except mll.exceptions.AzureAppNotPermitted:
+        raise RuntimeError("Mojang ещё не одобрил вход в лицензию для MF-Launcher. Пока играй без лицензии.")
+    except mll.exceptions.AccountNotOwnMinecraft:
+        raise RuntimeError("На этом аккаунте Microsoft нет лицензии Minecraft: Java Edition.")
     return {"type": "ms", "name": r["name"], "id": r["id"], "refresh": r["refresh_token"]}
 
 
