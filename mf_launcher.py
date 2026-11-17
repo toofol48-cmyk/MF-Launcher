@@ -237,7 +237,7 @@ def game_pid():
 
 def stop_game(pid):
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], creationflags=0x08000000)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T"], creationflags=0x08000000)   # без /F: как крестик окна, игра сохраняется
     else:
         os.kill(pid, 15)                                 # SIGTERM: Minecraft закрывается штатно, мир сохраняет
 
@@ -426,8 +426,7 @@ class App:
     def on_play(self):
         pid = game_pid()
         if pid:
-            if messagebox.askyesno("MF-Launcher", "Закрыть игру?" + ("\n\nВ одиночной игре несохранённое может потеряться — лучше выйти из мира в игре." if os.name == "nt" else "")):
-                stop_game(pid)
+            stop_game(pid)
             return
         acc = self.cfg.get("account")
         if not acc:
