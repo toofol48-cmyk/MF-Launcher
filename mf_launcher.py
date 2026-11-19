@@ -2,7 +2,7 @@
 """MF-Launcher — простой лаунчер сборки «Не мой сервер».
 Версии сборки = релизы GitHub с тегом pack-* (файл .mrpack). Настройки игрока не трогаются:
 файл из сборки перезаписывается, только если игрок его не менял (сверка с тем, что ставили в прошлый раз)."""
-import hashlib, http.server, io, json, os, queue, shutil, subprocess, sys, threading, urllib.error, urllib.parse, urllib.request, uuid, webbrowser, zipfile
+import hashlib, http.server, io, json, os, queue, shutil, subprocess, sys, threading, urllib.error, urllib.parse, urllib.request, webbrowser, zipfile
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 import minecraft_launcher_lib as mll
@@ -145,14 +145,10 @@ def install_pack(ver, status, progress, full=False):
 
 
 # ─── Вход ────────────────────────────────────────────────────────────────
-def offline_account(name):
-    # тот же UUID, что даёт ванильный сервер в офлайн-режиме
-    return {"type": "offline", "name": name, "id": uuid.UUID(bytes=_offline_uuid(name)).hex}
-
-def _offline_uuid(name):
-    b = bytearray(hashlib.md5(("OfflinePlayer:" + name).encode()).digest())
-    b[6] = (b[6] & 0x0F) | 0x30; b[8] = (b[8] & 0x3F) | 0x80
-    return bytes(b)
+def owns_minecraft(token):
+    """Владение Minecraft: Java Edition по магазину Minecraft (entitlements/mcstore), не только по профилю."""
+    items = mll.microsoft_account.get_store_information(token).get("items", [])
+    return any(it.get("name") in ("game_minecraft", "product_minecraft") for it in items)
 
 
 def microsoft_login():
@@ -180,17 +176,19 @@ def microsoft_login():
     try:
         r = mll.microsoft_account.complete_login(MS_CLIENT_ID, None, MS_REDIRECT, code, verifier)
     except mll.exceptions.AzureAppNotPermitted:
-        raise RuntimeError("Mojang ещё не одобрил вход в лицензию для MF-Launcher. Пока играй без лицензии.")
+        raise RuntimeError("Mojang ещё не одобрил вход для MF-Launcher. Пока можно играть через Prism Launcher.")
     except mll.exceptions.AccountNotOwnMinecraft:
+        raise RuntimeError("На этом аккаунте Microsoft нет лицензии Minecraft: Java Edition.")
+    if not owns_minecraft(r["access_token"]):
         raise RuntimeError("На этом аккаунте Microsoft нет лицензии Minecraft: Java Edition.")
     return {"type": "ms", "name": r["name"], "id": r["id"], "refresh": r["refresh_token"]}
 
 
 def session(acc):
-    """Свежий токен для запуска (лицензия) или пустой (без лицензии)."""
-    if acc["type"] != "ms":
-        return acc, "0"
+    """Свежий токен для запуска. Владение игрой проверяется заново при каждом запуске."""
     r = mll.microsoft_account.complete_refresh(MS_CLIENT_ID, None, MS_REDIRECT, acc["refresh"])
+    if not owns_minecraft(r["access_token"]):
+        raise RuntimeError("На этом аккаунте Microsoft нет лицензии Minecraft: Java Edition.")
     acc = dict(acc, name=r["name"], id=r["id"], refresh=r["refresh_token"])
     return acc, r["access_token"]
 
@@ -327,27 +325,16 @@ class App:
     def draw_account(self):
         for w in self.acc_box.winfo_children(): w.destroy()
         acc = self.cfg.get("account")
-        if acc:
-            kind = "лицензия" if acc["type"] == "ms" else "без лицензии"
+        if acc and acc.get("type") == "ms":
             tk.Button(self.acc_box, text="Выйти", command=self.logout, bg=PANEL, fg=FG, relief="flat").pack(side="right")
-            tk.Label(self.acc_box, text=f"{acc['name']}  ·  {kind}", bg=BG, fg=FG, font=self.F(11), anchor="w").pack(side="left", fill="x", expand=True)
+            tk.Label(self.acc_box, text=acc["name"], bg=BG, fg=FG, font=self.F(11), anchor="w").pack(side="left", fill="x", expand=True)
             return
-        self.nick = tk.Entry(self.acc_box, bg=PANEL, fg=FG, insertbackground=FG, relief="flat", font=self.F(11))
-        self.nick.insert(0, self.cfg.get("last_nick", "")); self.nick.pack(fill="x", ipady=4)
-        b = tk.Frame(self.acc_box, bg=BG); b.pack(fill="x", pady=(6, 0))
-        b.columnconfigure((0, 1), weight=1, uniform="b")
-        tk.Button(b, text="Войти без лицензии", command=self.login_offline, bg=PANEL, fg=FG, relief="flat").grid(row=0, column=0, sticky="ew", padx=(0, 3))
-        tk.Button(b, text="Войти в лицензию", command=self.login_ms, bg=PANEL, fg=FG, relief="flat").grid(row=0, column=1, sticky="ew", padx=(3, 0))
-
-    def login_offline(self):
-        n = self.nick.get().strip()
-        if not (3 <= len(n) <= 16 and all(c.isascii() and (c.isalnum() or c == "_") for c in n)):
-            return messagebox.showwarning("MF-Launcher", "Ник: 3–16 символов, латиница, цифры и _")
-        self.cfg.update(account=offline_account(n), last_nick=n); save(CFG_FILE, self.cfg); self.draw_account()
+        # играть можно только с лицензией: вход через Microsoft и проверка владения игрой (правила Mojang)
+        tk.Button(self.acc_box, text="Войти через Microsoft", command=self.login_ms, bg=PANEL, fg=FG, relief="flat").pack(fill="x", ipady=4)
 
     def login_ms(self):
         if not MS_CLIENT_ID:
-            return messagebox.showinfo("MF-Launcher", "Вход в лицензию пока не подключён — заходи без лицензии.")
+            return messagebox.showinfo("MF-Launcher", "Вход через Microsoft пока не подключён.")
         def go():
             self.set_status("Войди в аккаунт Microsoft в браузере…")
             acc = microsoft_login()
@@ -437,8 +424,8 @@ class App:
             stop_game(pid)
             return
         acc = self.cfg.get("account")
-        if not acc:
-            return messagebox.showwarning("MF-Launcher", "Сначала войди: введи ник и нажми «Войти без лицензии»")
+        if not acc or acc.get("type") != "ms":
+            return messagebox.showwarning("MF-Launcher", "Сначала войди через Microsoft (нужна лицензия Minecraft: Java Edition).")
         self.cfg["ram"] = int(self.ram.get().split()[0]); save(CFG_FILE, self.cfg)
         i = self.ver.current()
         target = self.versions[i] if 0 <= i < len(self.versions) else None
